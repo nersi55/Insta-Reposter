@@ -1,0 +1,9 @@
+.env
+cookie-insta.json
+.venv/
+*.mp4
+*.jpg
+*.jpeg
+*.png
+__pycache__/
+.DS_Store

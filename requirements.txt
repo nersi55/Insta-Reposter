@@ -1,0 +1,4 @@
+instagrapi
+google-generativeai
+python-dotenv
+pillow
