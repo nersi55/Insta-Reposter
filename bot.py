@@ -2,10 +2,13 @@ import os
 import time
 import requests
 import json
+import traceback
 from dotenv import load_dotenv
 from instagrapi import Client
 import google.generativeai as genai
 from PIL import Image
+import gspread
+from google.oauth2.service_account import Credentials
 
 # Load environment variables
 load_dotenv()
@@ -137,7 +140,6 @@ def upload_to_tmpfiles(file_path):
     except Exception as e:
         print(f"Error uploading to tmpfiles: {e}")
         return None
-
 def analyze_media(file_path, media_type, username=None):
     """Uses Gemini to analyze media and generate caption."""
     print("Analyzing media with Gemini...")
@@ -178,7 +180,7 @@ def analyze_media(file_path, media_type, username=None):
         return None
 
 def publish_to_instagram(media_url, caption, media_type):
-    """Publishes using Instagram Graph API."""
+    """Publishes using Instagram Graph API. Returns True if successful."""
     print("Publishing via Graph API...")
     
     base_url = f"https://graph.facebook.com/v18.0/{INSTAGRAM_ACCOUNT_ID}/media"
@@ -196,97 +198,192 @@ def publish_to_instagram(media_url, caption, media_type):
     
     # Step 1: Create Container
     print("Creating media container...")
-    resp = requests.post(base_url, data=payload)
-    result = resp.json()
-    
-    if 'id' not in result:
-        print(f"Error creating container: {result}")
-        return
-    
-    creation_id = result['id']
-    print(f"Container created ID: {creation_id}")
-    
-    # Step 2: Publish Container
-    publish_url = f"https://graph.facebook.com/v18.0/{INSTAGRAM_ACCOUNT_ID}/media_publish"
-    publish_payload = {
-        'creation_id': creation_id,
-        'access_token': ACCESS_TOKEN
-    }
-    
-    print("Waiting for media to be ready...")
-    # Give it a moment for processing (especially videos)
-    time.sleep(10) 
-    
-    # Check status loop for video
-    if media_type == "VIDEO":
-        status_url = f"https://graph.facebook.com/v18.0/{creation_id}"
-        while True:
-            status_resp = requests.get(status_url, params={'fields': 'status_code', 'access_token': ACCESS_TOKEN})
-            status_data = status_resp.json()
-            code = status_data.get('status_code')
-            print(f"Processing status: {code}")
-            
-            if code == 'FINISHED':
-                break
-            elif code == 'ERROR':
-                print("Error in media processing by Instagram.")
-                return
-            
-            time.sleep(5)
-
-    print("Publishing container...")
-    pub_resp = requests.post(publish_url, data=publish_payload)
-    pub_result = pub_resp.json()
-    
-    if 'id' in pub_result:
-        print(f"Successfully published! Post ID: {pub_result['id']}")
-    else:
-        print(f"Error publishing: {pub_result}")
-
-def main():
-    while True:
-        link = input("\nEnter Instagram Link (or 'q' to quit): ")
-        if link.lower() == 'q':
-            break
+    try:
+        resp = requests.post(base_url, data=payload)
+        result = resp.json()
         
-        # 1. Download media
-        local_path, media_type, username = download_media(link)
+        if 'id' not in result:
+            print(f"Error creating container: {result}")
+            return False
         
-        if local_path and media_type:
-            print(f"Downloaded to: {local_path}")
-            if username:
-                print(f"Original poster: @{username}")
+        creation_id = result['id']
+        print(f"Container created ID: {creation_id}")
+        
+        # Step 2: Publish Container
+        publish_url = f"https://graph.facebook.com/v18.0/{INSTAGRAM_ACCOUNT_ID}/media_publish"
+        publish_payload = {
+            'creation_id': creation_id,
+            'access_token': ACCESS_TOKEN
+        }
+        
+        print("Waiting for media to be ready...")
+        # Give it a moment for processing (especially videos)
+        time.sleep(10) 
+        
+        # Check status loop for video
+        if media_type == "VIDEO":
+            status_url = f"https://graph.facebook.com/v18.0/{creation_id}"
+            while True:
+                status_resp = requests.get(status_url, params={'fields': 'status_code', 'access_token': ACCESS_TOKEN})
+                status_data = status_resp.json()
+                code = status_data.get('status_code')
+                print(f"Processing status: {code}")
+                
+                if code == 'FINISHED':
+                    break
+                elif code == 'ERROR':
+                    print("Error in media processing by Instagram.")
+                    return False
+                
+                time.sleep(5)
+
+        print("Publishing container...")
+        pub_resp = requests.post(publish_url, data=publish_payload)
+        pub_result = pub_resp.json()
+        
+        if 'id' in pub_result:
+            print(f"Successfully published! Post ID: {pub_result['id']}")
+            return True
+        else:
+            print(f"Error publishing: {pub_result}")
+            return False
+    except Exception as e:
+        print(f"Exceptions during publishing: {e}")
+        return False
+
+def process_single_link(link):
+    """Downloads, analyzes, and reposts a single Instagram link."""
+    # 1. Download media
+    local_path, media_type, username = download_media(link)
+    
+    if local_path and media_type:
+        print(f"Downloaded to: {local_path}")
+        if username:
+            print(f"Original poster: @{username}")
+        
+        # 2. Analyze with Gemini
+        new_caption = analyze_media(local_path, media_type, username)
+        
+        if new_caption:
+            print(f"\nGenerated Caption:\n{new_caption}\n")
             
-            # 2. Analyze with Gemini
-            new_caption = analyze_media(local_path, media_type, username)
+            # Auto-repost without confirmation
+            print("Auto-reposting...")
             
-            if new_caption:
-                print(f"\nGenerated Caption:\n{new_caption}\n")
-                
-                # Auto-repost without confirmation
-                print("Auto-reposting...")
-                
-                # 3. Re-encode video if needed (to preserve audio)
-                if media_type == "VIDEO":
-                    local_path = reencode_video(local_path)
-                
-                # 4. Upload to tmpfiles.org
-                public_url = upload_to_tmpfiles(local_path)
-                
-                if public_url:
-                    # 5. Publish to Instagram via Graph API
-                    publish_to_instagram(public_url, new_caption, media_type)
-                else:
-                    print("Failed to upload to tmpfiles.org")
-                
-                # Cleanup local file
-                if os.path.exists(local_path):
+            # 3. Re-encode video if needed (to preserve audio)
+            if media_type == "VIDEO":
+                local_path = reencode_video(local_path)
+            
+            # 4. Upload to tmpfiles.org
+            public_url = upload_to_tmpfiles(local_path)
+            
+            success = False
+            if public_url:
+                # 5. Publish to Instagram via Graph API
+                success = publish_to_instagram(public_url, new_caption, media_type)
+            else:
+                print("Failed to upload to tmpfiles.org")
+            
+            # Cleanup local file
+            if os.path.exists(local_path):
+                try:
                     os.remove(local_path)
                     print(f"Cleaned up {local_path}")
-            else:
-                print("Caption generation failed.")
+                except:
+                    pass
+            
+            return success
         else:
-            print("Could not download media.")
+            print("Caption generation failed.")
+    else:
+        print("Could not download media.")
+    return False
+
+def connect_to_sheet():
+    """Connects to Google Sheets using credentials.json."""
+    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+    if os.path.exists("credentials.json"):
+        try:
+            creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+            client = gspread.authorize(creds)
+            return client
+        except Exception as e:
+            print(f"Error authorizing gspread: {e}")
+            return None
+    else:
+        print("credentials.json not found! Please provide Google Service Account credentials.")
+        # Instructions for the user
+        print("1. Go to Google Cloud Console.")
+        print("2. Create a service account and download the JSON key.")
+        print("3. Rename it to 'credentials.json' and place it in this folder.")
+        print("4. Share your Google Sheet with the email in the JSON file.")
+        return None
+
+def main():
+    print("Starting Instagram Bot with Google Sheets integration...")
+    
+    sheet_id = "14J6W2DysRoAw6BRF2VjyHCldmFZ07vXaSvxSYcEXzRo"
+    worksheet_name = "Yashans"
+    
+    while True:
+        client = connect_to_sheet()
+        if not client:
+            print("Waiting for credentials.json. Retrying in 60 seconds...")
+            time.sleep(60)
+            continue
+            
+        try:
+            try:
+                sheet_obj = client.open_by_key(sheet_id)
+            except gspread.exceptions.SpreadsheetNotFound:
+                print(f"Error: Spreadsheet with ID '{sheet_id}' not found!")
+                time.sleep(60)
+                continue
+            except (gspread.exceptions.APIError, PermissionError) as e:
+                print(f"Error: Permission Denied (403).")
+                print("CRITICAL: You MUST share the spreadsheet with this email:")
+                print("web-client-1@plenary-net-476220-c9.iam.gserviceaccount.com")
+                print("Set the role to 'Editor'.")
+                time.sleep(60)
+                continue
+
+            sheet = sheet_obj.worksheet(worksheet_name)
+            # Get all records (including header)
+            rows = sheet.get_all_values()
+            
+            found_job = False
+            for i, row in enumerate(rows):
+                if i == 0: continue # Skip header
+                
+                # columns: url (0), downloaded (1), name (2), Sent-to-Insta (3), runever (4), story (5)
+                if len(row) < 5: continue
+                
+                url = row[0]
+                runever = row[4]
+                
+                if url and not runever: # runever is empty or whitespace
+                    print(f"\n--- Processing row {i+1}: {url} ---")
+                    found_job = True
+                    success = process_single_link(url)
+                    
+                    if success:
+                        print(f"Process successful! Updating row {i+1}...")
+                        sheet.update_cell(i + 1, 5, "Yes") # Column 5 is runever
+                    else:
+                        print(f"Process failed for row {i+1}.")
+                    
+                    # Wait between posts to avoid rate limits
+                    print("Waiting 1 minute before checking next row...")
+                    time.sleep(60)
+            
+            if not found_job:
+                print("No new links to process. Checking again in 5 minutes...")
+                time.sleep(300)
+                
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+            traceback.print_exc()
+            time.sleep(60)
 
 if __name__ == "__main__":
     main()

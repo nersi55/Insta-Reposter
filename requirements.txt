@@ -2,3 +2,5 @@ instagrapi
 google-generativeai
 python-dotenv
 pillow
+gspread
+google-auth

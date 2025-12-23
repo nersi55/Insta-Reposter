@@ -1,5 +1,6 @@
 .env
 cookie-insta.json
+credentials.json
 .venv/
 *.mp4
 *.jpg
