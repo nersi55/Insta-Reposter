@@ -63,13 +63,44 @@ def download_media(link):
             media_info = cl.media_info(media_pk)
         except Exception as e:
             print(f"Standard media_info (v1) failed: {e}")
-            if "validation error" in str(e).lower() or "input should be a valid list" in str(e).lower() or "login_required" in str(e).lower():
-                print("Detected validation error or login requirement, trying web API fallback...")
+            
+            # Fallback 1: GQL (sometimes more stable with parsing)
+            try:
+                print("Trying media_info_gql fallback...")
+                media_info = cl.media_info_gql(media_pk)
+            except Exception as eg:
+                print(f"GQL fallback failed: {eg}")
+            
+            # Fallback 2: a1 (web API)
+            if not media_info:
                 try:
-                    # media_info_a1 doesn't usually require login for public accounts
+                    print("Trying web API (a1) fallback...")
                     media_info = cl.media_info_a1(media_pk)
                 except Exception as e2:
                     print(f"Web API fallback (a1) also failed: {e2}")
+
+            # Fallback 3: Direct Private Request (Bypass Pydantic Models entirely)
+            if not media_info:
+                try:
+                    print("Trying direct private request to bypass Pydantic models...")
+                    info_raw = cl.private_request(f"media/{media_pk}/info/")
+                    if 'items' in info_raw and info_raw['items']:
+                        item = info_raw['items'][0]
+                        # Create a dummy object that mimics media_info structure
+                        class DummyInfo:
+                            def __init__(self, item):
+                                self.media_type = item.get('media_type')
+                                self.product_type = item.get('product_type', '')
+                                self.user = type('User', (), {'username': item.get('user', {}).get('username')})
+                                self.resources = [] # Simplified
+                                # For albums
+                                if 'carousel_media' in item:
+                                    self.resources = [type('Res', (), {'media_type': r.get('media_type')}) for r in item['carousel_media']]
+                        
+                        media_info = DummyInfo(item)
+                        print("Direct request successful (Pydantic bypassed).")
+                except Exception as e3:
+                    print(f"Direct request fallback failed: {e3}")
             
         if not media_info:
             print("Failed to retrieve media info after all attempts.")
