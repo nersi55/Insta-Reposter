@@ -16,6 +16,7 @@ load_dotenv()
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN")
 INSTAGRAM_ACCOUNT_ID = os.getenv("INSTAGRAM_ACCOUNT_ID")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+POST_INTERVAL_MINUTES = int(os.getenv("POST_INTERVAL_MINUTES", "1"))  # Default: 1 minute
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
@@ -603,12 +604,13 @@ def main():
                         sheet.update_cell(i + 1, 5, "No") # Mark as failed
                     
                     # Wait between posts to avoid rate limits
-                    print("Waiting 1 minute before checking next row...")
-                    time.sleep(60)
+                    wait_seconds = POST_INTERVAL_MINUTES * 60
+                    print(f"Waiting {POST_INTERVAL_MINUTES} minute(s) before checking next row...")
+                    time.sleep(wait_seconds)
             
             if not found_job:
-                print("No new links to process. Checking again in 5 minutes...")
-                time.sleep(300)
+                print(f"No new links to process. Checking again in {POST_INTERVAL_MINUTES * 5} minutes...")
+                time.sleep(POST_INTERVAL_MINUTES * 5 * 60)
                 
         except Exception as e:
             print(f"Error in main loop: {e}")
