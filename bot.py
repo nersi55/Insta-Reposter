@@ -599,7 +599,8 @@ def main():
                         print(f"Process successful! Updating row {i+1}...")
                         sheet.update_cell(i + 1, 5, "Yes") # Column 5 is runever
                     else:
-                        print(f"Process failed for row {i+1}.")
+                        print(f"Process failed for row {i+1}. Marking as 'No'...")
+                        sheet.update_cell(i + 1, 5, "No") # Mark as failed
                     
                     # Wait between posts to avoid rate limits
                     print("Waiting 1 minute before checking next row...")
