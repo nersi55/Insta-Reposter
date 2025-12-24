@@ -19,10 +19,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 # Initialize Instagram Client (for extracting info only)
 cl = Client()
+cl.delay_range = [2, 5]
 
 def download_media(link):
     """Downloads media from Instagram link using instagrapi."""
@@ -31,47 +32,94 @@ def download_media(link):
         # Load cookies
         if os.path.exists("cookie-insta.json"):
              with open("cookie-insta.json", 'r') as f:
-                cookies_list = json.load(f)
-                cookie_dict = {}
-                if isinstance(cookies_list, list):
-                    for c in cookies_list:
-                        cookie_dict[c['name']] = c['value']
-                else:
-                    cookie_dict = cookies_list
-                
-                # set cookies manually
-                cl.private.cookies.update(cookie_dict)
-                cl.public.cookies.update(cookie_dict)
+                try:
+                    settings = json.load(f)
+                    
+                    # If it's a full instagrapi settings file
+                    if isinstance(settings, dict) and "cookies" in settings:
+                        cl.set_settings(settings)
+                        print("Settings loaded successfully.")
+                    else:
+                        # If it's a list of cookies or just a cookie dict
+                        cookie_dict = {}
+                        if isinstance(settings, list):
+                            for c in settings:
+                                cookie_dict[c['name']] = c['value']
+                        else:
+                            cookie_dict = settings
+                        
+                        # Set cookies on the session
+                        cl.set_settings({"cookies": cookie_dict})
+                        print("Cookies loaded (via settings) successfully.")
+                except Exception as ce:
+                    print(f"Could not load cookies: {ce}")
         
         media_pk = cl.media_pk_from_url(link)
-        media_info = cl.media_info(media_pk)
+        
+        # Try different methods to get media info to bypass Pydantic validation errors
+        media_info = None
+        try:
+            print("Fetching media info (v1)...")
+            media_info = cl.media_info(media_pk)
+        except Exception as e:
+            print(f"Standard media_info (v1) failed: {e}")
+            if "validation error" in str(e).lower() or "input should be a valid list" in str(e).lower() or "login_required" in str(e).lower():
+                print("Detected validation error or login requirement, trying web API fallback...")
+                try:
+                    # media_info_a1 doesn't usually require login for public accounts
+                    media_info = cl.media_info_a1(media_pk)
+                except Exception as e2:
+                    print(f"Web API fallback (a1) also failed: {e2}")
+            
+        if not media_info:
+            print("Failed to retrieve media info after all attempts.")
+            return None, None, None
+
         media_type = media_info.media_type
         
         # Get username of original poster
         username = media_info.user.username if media_info.user else None
         
-        # Download the file
         local_path = None
         if media_type == 1: # Photo
             print("Downloading photo...")
             local_path = cl.photo_download(media_pk, folder=".")
-            m_type = "IMAGE"
-        elif media_type == 2 and media_info.product_type == "clips": # Reel
-            print("Downloading reel...")
-            local_path = cl.clip_download(media_pk, folder=".")
-            m_type = "VIDEO"
-        elif media_type == 2: # Video
-            print("Downloading video...")
-            local_path = cl.video_download(media_pk, folder=".")
-            m_type = "VIDEO"
+            return str(local_path), "IMAGE", username
+        elif media_type == 2: # Video/Reel
+            print("Downloading video/reel...")
+            try:
+                if getattr(media_info, 'product_type', '') == "clips":
+                    local_path = cl.clip_download(media_pk, folder=".")
+                else:
+                    local_path = cl.video_download(media_pk, folder=".")
+            except Exception as de:
+                print(f"Download failed with primary method, trying alternative: {de}")
+                local_path = cl.video_download(media_pk, folder=".")
+            return str(local_path), "VIDEO", username
         elif media_type == 8: # Album
-             print("Albums not supported in this version.")
-             return None, None, None
-        
-        return local_path, m_type, username
+            print("Downloading album...")
+            paths = cl.album_download(media_pk, folder=".")
+            items = []
+            for i, p in enumerate(paths):
+                p_str = str(p)
+                # Determine type from resources or extension
+                if media_info.resources and i < len(media_info.resources):
+                    r_type = "IMAGE" if media_info.resources[i].media_type == 1 else "VIDEO"
+                else:
+                    ext = p_str.lower().split('.')[-1]
+                    r_type = "IMAGE" if ext in ['jpg', 'jpeg', 'png'] else "VIDEO"
+                items.append((p_str, r_type))
+            return items, "ALBUM", username
+        else:
+            print(f"Unknown media type: {media_type}")
+            return None, None, None
 
     except Exception as e:
         print(f"Error downloading: {e}")
+        # If the error contains HTML/Comet script, it's a login challenge
+        if "comet" in str(e).lower() or "script" in str(e).lower():
+            print("CRITICAL: Instagram is blocking the request or requiring login/challenge.")
+            print("Try refreshing your cookie-insta.json on the server.")
         return None, None, None
 
 def reencode_video(input_path):
@@ -179,26 +227,59 @@ def analyze_media(file_path, media_type, username=None):
         print(f"Error in analysis: {e}")
         return None
 
-def publish_to_instagram(media_url, caption, media_type):
-    """Publishes using Instagram Graph API. Returns True if successful."""
-    print("Publishing via Graph API...")
+def publish_to_instagram(media_data, caption, media_type):
+    """Publishes using Instagram Graph API. Supports IMAGE, VIDEO, and ALBUM."""
+    print(f"Publishing {media_type} via Graph API...")
     
     base_url = f"https://graph.facebook.com/v18.0/{INSTAGRAM_ACCOUNT_ID}/media"
     
-    payload = {
-        'access_token': ACCESS_TOKEN,
-        'caption': caption
-    }
-    
-    if media_type == "IMAGE":
-        payload['image_url'] = media_url
-    else: # VIDEO / REELS
-        payload['media_type'] = "REELS" 
-        payload['video_url'] = media_url
-    
-    # Step 1: Create Container
-    print("Creating media container...")
     try:
+        if media_type == "ALBUM":
+            # media_data is a list of (url, type) tuples
+            item_ids = []
+            for url, m_t in media_data:
+                print(f"Creating item container for {m_t}...")
+                item_payload = {
+                    'access_token': ACCESS_TOKEN,
+                    'is_carousel_item': 'true'
+                }
+                if m_t == "IMAGE":
+                    item_payload['image_url'] = url
+                else:
+                    item_payload['media_type'] = "VIDEO"
+                    item_payload['video_url'] = url
+                
+                resp = requests.post(base_url, data=item_payload)
+                res = resp.json()
+                if 'id' not in res:
+                    print(f"Error creating carousel item: {res}")
+                    return False
+                item_ids.append(res['id'])
+            
+            print(f"Waiting for {len(item_ids)} carousel items to process...")
+            time.sleep(15) # Base wait
+            
+            # Create Carousel Container
+            print("Creating carousel container...")
+            payload = {
+                'access_token': ACCESS_TOKEN,
+                'caption': caption,
+                'media_type': 'CAROUSEL',
+                'children': ','.join(item_ids)
+            }
+        else:
+            # Single Media
+            payload = {
+                'access_token': ACCESS_TOKEN,
+                'caption': caption
+            }
+            if media_type == "IMAGE":
+                payload['image_url'] = media_data
+            else: # VIDEO / REELS
+                payload['media_type'] = "REELS" 
+                payload['video_url'] = media_data
+        
+        # Step 1: Create Main Container
         resp = requests.post(base_url, data=payload)
         result = resp.json()
         
@@ -209,21 +290,15 @@ def publish_to_instagram(media_url, caption, media_type):
         creation_id = result['id']
         print(f"Container created ID: {creation_id}")
         
-        # Step 2: Publish Container
-        publish_url = f"https://graph.facebook.com/v18.0/{INSTAGRAM_ACCOUNT_ID}/media_publish"
-        publish_payload = {
-            'creation_id': creation_id,
-            'access_token': ACCESS_TOKEN
-        }
-        
+        # Step 2: Wait & Publish
         print("Waiting for media to be ready...")
-        # Give it a moment for processing (especially videos)
         time.sleep(10) 
         
-        # Check status loop for video
-        if media_type == "VIDEO":
+        # Check status loop for video or album
+        if media_type in ["VIDEO", "ALBUM"]:
             status_url = f"https://graph.facebook.com/v18.0/{creation_id}"
-            while True:
+            max_retries = 30
+            for _ in range(max_retries):
                 status_resp = requests.get(status_url, params={'fields': 'status_code', 'access_token': ACCESS_TOKEN})
                 status_data = status_resp.json()
                 code = status_data.get('status_code')
@@ -232,13 +307,13 @@ def publish_to_instagram(media_url, caption, media_type):
                 if code == 'FINISHED':
                     break
                 elif code == 'ERROR':
-                    print("Error in media processing by Instagram.")
+                    print(f"Error in media processing: {status_data}")
                     return False
-                
-                time.sleep(5)
+                time.sleep(10)
 
         print("Publishing container...")
-        pub_resp = requests.post(publish_url, data=publish_payload)
+        publish_url = f"https://graph.facebook.com/v18.0/{INSTAGRAM_ACCOUNT_ID}/media_publish"
+        pub_resp = requests.post(publish_url, data={'creation_id': creation_id, 'access_token': ACCESS_TOKEN})
         pub_result = pub_resp.json()
         
         if 'id' in pub_result:
@@ -247,57 +322,99 @@ def publish_to_instagram(media_url, caption, media_type):
         else:
             print(f"Error publishing: {pub_result}")
             return False
+            
     except Exception as e:
         print(f"Exceptions during publishing: {e}")
         return False
 
 def process_single_link(link):
-    """Downloads, analyzes, and reposts a single Instagram link."""
+    """Downloads, analyzes, and reposts a single Instagram link (supports Photo, Video, Album)."""
     # 1. Download media
-    local_path, media_type, username = download_media(link)
+    media_data, media_type, username = download_media(link)
     
-    if local_path and media_type:
-        print(f"Downloaded to: {local_path}")
-        if username:
-            print(f"Original poster: @{username}")
-        
-        # 2. Analyze with Gemini
-        new_caption = analyze_media(local_path, media_type, username)
-        
-        if new_caption:
-            print(f"\nGenerated Caption:\n{new_caption}\n")
-            
-            # Auto-repost without confirmation
-            print("Auto-reposting...")
-            
-            # 3. Re-encode video if needed (to preserve audio)
-            if media_type == "VIDEO":
-                local_path = reencode_video(local_path)
-            
-            # 4. Upload to tmpfiles.org
-            public_url = upload_to_tmpfiles(local_path)
-            
-            success = False
-            if public_url:
-                # 5. Publish to Instagram via Graph API
-                success = publish_to_instagram(public_url, new_caption, media_type)
-            else:
-                print("Failed to upload to tmpfiles.org")
-            
-            # Cleanup local file
-            if os.path.exists(local_path):
-                try:
-                    os.remove(local_path)
-                    print(f"Cleaned up {local_path}")
-                except:
-                    pass
-            
-            return success
-        else:
-            print("Caption generation failed.")
-    else:
+    if not media_data or not media_type:
         print("Could not download media.")
-    return False
+        return False
+
+    print(f"Original poster: @{username}")
+    
+    try:
+        new_caption = None
+        if media_type == "ALBUM":
+            print(f"Processing album with {len(media_data)} items...")
+            # Limit to 10 items for Graph API
+            if len(media_data) > 10:
+                print("Album too long, limiting to 10 items.")
+                media_data = media_data[:10]
+            
+            # Analyze using the first item of the album
+            first_path, first_type = media_data[0]
+            new_caption = analyze_media(first_path, first_type, username)
+            
+            if new_caption:
+                print(f"\nGenerated Caption:\n{new_caption}\n")
+                print("Auto-reposting Album...")
+                
+                album_urls = []
+                for path, m_t in media_data:
+                    processed_path = path
+                    if m_t == "VIDEO":
+                        processed_path = reencode_video(path)
+                    
+                    url = upload_to_tmpfiles(processed_path)
+                    if url:
+                        album_urls.append((url, m_t))
+                    else:
+                        print(f"Failed to upload item: {path}")
+                
+                if len(album_urls) > 0:
+                    success = publish_to_instagram(album_urls, new_caption, "ALBUM")
+                else:
+                    print("Failed to upload any album items.")
+                    success = False
+            else:
+                print("Caption generation failed for album.")
+                success = False
+
+        else: # IMAGE or VIDEO
+            print(f"Downloaded to: {media_data}")
+            new_caption = analyze_media(media_data, media_type, username)
+            
+            if new_caption:
+                print(f"\nGenerated Caption:\n{new_caption}\n")
+                print("Auto-reposting...")
+                
+                p_to_upload = media_data
+                if media_type == "VIDEO":
+                    p_to_upload = reencode_video(media_data)
+                
+                public_url = upload_to_tmpfiles(p_to_upload)
+                if public_url:
+                    success = publish_to_instagram(public_url, new_caption, media_type)
+                else:
+                    print("Failed to upload to tmpfiles.org")
+                    success = False
+            else:
+                print("Caption generation failed.")
+                success = False
+        
+        # Cleanup
+        if media_type == "ALBUM":
+            for p, _ in media_data:
+                if os.path.exists(p):
+                    try: os.remove(p); print(f"Cleaned up {p}")
+                    except: pass
+        else:
+            if os.path.exists(media_data):
+                try: os.remove(media_data); print(f"Cleaned up {media_data}")
+                except: pass
+        
+        return success
+
+    except Exception as e:
+        print(f"Error in process_single_link: {e}")
+        traceback.print_exc()
+        return False
 
 def connect_to_sheet():
     """Connects to Google Sheets using credentials.json."""
