@@ -114,8 +114,26 @@ def download_media(link):
         local_path = None
         if media_type == 1: # Photo
             print("Downloading photo...")
-            local_path = cl.photo_download(media_pk, folder=".")
+            try:
+                local_path = cl.photo_download(media_pk, folder=".")
+            except Exception as pe:
+                print(f"Photo download failed: {pe}")
+                # Try direct URL download
+                try:
+                    info_raw = cl.private_request(f"media/{media_pk}/info/")
+                    if 'items' in info_raw and info_raw['items']:
+                        img_url = info_raw['items'][0]['image_versions2']['candidates'][0]['url']
+                        local_path = f"{username}_{media_pk}.jpg"
+                        response = requests.get(img_url, stream=True)
+                        with open(local_path, 'wb') as f:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                        print(f"Direct photo download successful: {local_path}")
+                except Exception as de:
+                    print(f"Direct photo download also failed: {de}")
+                    return None, None, None
             return str(local_path), "IMAGE", username
+            
         elif media_type == 2: # Video/Reel
             print("Downloading video/reel...")
             try:
@@ -124,23 +142,86 @@ def download_media(link):
                 else:
                     local_path = cl.video_download(media_pk, folder=".")
             except Exception as de:
-                print(f"Download failed with primary method, trying alternative: {de}")
-                local_path = cl.video_download(media_pk, folder=".")
+                print(f"Download failed with library method: {de}")
+                # Direct download fallback
+                try:
+                    print("Attempting direct video download from URL...")
+                    info_raw = cl.private_request(f"media/{media_pk}/info/")
+                    if 'items' in info_raw and info_raw['items']:
+                        item = info_raw['items'][0]
+                        video_url = None
+                        
+                        # Try different video URL locations
+                        if 'video_versions' in item and item['video_versions']:
+                            video_url = item['video_versions'][0]['url']
+                        elif 'video_url' in item:
+                            video_url = item['video_url']
+                        
+                        if video_url:
+                            local_path = f"{username}_{media_pk}.mp4"
+                            print(f"Downloading from direct URL...")
+                            response = requests.get(video_url, stream=True)
+                            with open(local_path, 'wb') as f:
+                                for chunk in response.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+                            print(f"Direct video download successful: {local_path}")
+                        else:
+                            print("Could not find video URL in response")
+                            return None, None, None
+                except Exception as de2:
+                    print(f"Direct video download also failed: {de2}")
+                    return None, None, None
             return str(local_path), "VIDEO", username
+            
         elif media_type == 8: # Album
             print("Downloading album...")
-            paths = cl.album_download(media_pk, folder=".")
-            items = []
-            for i, p in enumerate(paths):
-                p_str = str(p)
-                # Determine type from resources or extension
-                if media_info.resources and i < len(media_info.resources):
-                    r_type = "IMAGE" if media_info.resources[i].media_type == 1 else "VIDEO"
-                else:
-                    ext = p_str.lower().split('.')[-1]
-                    r_type = "IMAGE" if ext in ['jpg', 'jpeg', 'png'] else "VIDEO"
-                items.append((p_str, r_type))
-            return items, "ALBUM", username
+            try:
+                paths = cl.album_download(media_pk, folder=".")
+                items = []
+                for i, p in enumerate(paths):
+                    p_str = str(p)
+                    # Determine type from resources or extension
+                    if media_info.resources and i < len(media_info.resources):
+                        r_type = "IMAGE" if media_info.resources[i].media_type == 1 else "VIDEO"
+                    else:
+                        ext = p_str.lower().split('.')[-1]
+                        r_type = "IMAGE" if ext in ['jpg', 'jpeg', 'png'] else "VIDEO"
+                    items.append((p_str, r_type))
+                return items, "ALBUM", username
+            except Exception as ae:
+                print(f"Album download failed: {ae}")
+                # Direct download for albums
+                try:
+                    print("Attempting direct album download...")
+                    info_raw = cl.private_request(f"media/{media_pk}/info/")
+                    if 'items' in info_raw and info_raw['items']:
+                        item = info_raw['items'][0]
+                        if 'carousel_media' in item:
+                            items = []
+                            for idx, carousel_item in enumerate(item['carousel_media']):
+                                m_type = carousel_item.get('media_type')
+                                if m_type == 1:  # Photo
+                                    url = carousel_item['image_versions2']['candidates'][0]['url']
+                                    local_path = f"{username}_{media_pk}_{idx}.jpg"
+                                    r_type = "IMAGE"
+                                elif m_type == 2:  # Video
+                                    url = carousel_item['video_versions'][0]['url'] if 'video_versions' in carousel_item else None
+                                    local_path = f"{username}_{media_pk}_{idx}.mp4"
+                                    r_type = "VIDEO"
+                                else:
+                                    continue
+                                
+                                if url:
+                                    response = requests.get(url, stream=True)
+                                    with open(local_path, 'wb') as f:
+                                        for chunk in response.iter_content(chunk_size=8192):
+                                            f.write(chunk)
+                                    items.append((local_path, r_type))
+                            print(f"Direct album download successful: {len(items)} items")
+                            return items, "ALBUM", username
+                except Exception as dae:
+                    print(f"Direct album download also failed: {dae}")
+                    return None, None, None
         else:
             print(f"Unknown media type: {media_type}")
             return None, None, None
