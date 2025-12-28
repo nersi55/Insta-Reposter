@@ -800,11 +800,11 @@ def main():
                 else:
                     print(f"Process failed for row {i+1}. Marking as 'No'...")
                     worksheet.update_cell(i + 1, 6, "No")  # Mark as failed
-                    
-                    # Wait between posts to avoid rate limits
-                    wait_seconds = POST_INTERVAL_MINUTES * 60
-                    print(f"Waiting {POST_INTERVAL_MINUTES} minute(s) before checking next row...")
-                    time.sleep(wait_seconds)
+                
+                # Wait between posts to avoid rate limits (applies to both success and failure)
+                wait_seconds = POST_INTERVAL_MINUTES * 60
+                print(f"Waiting {POST_INTERVAL_MINUTES} minute(s) before checking next row...")
+                time.sleep(wait_seconds)
             
             if not found_job:
                 print(f"No new links to process. Checking again in {POST_INTERVAL_MINUTES * 5} minutes...")
